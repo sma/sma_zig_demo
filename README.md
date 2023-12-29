@@ -51,6 +51,8 @@ und postuliere, dass ein TSL-Programm aus einer Folge von nicht-leeren durch Wei
 
 Folgt einem Wort ein `:`, ist dies ein "setter" und der gleichnamigen Variable wird das Argument als Wert zugewiesen. Jedes andere Wort (außer Zahlen) ist quasi eine Variable und es wird entweder der Wert zurückgegeben oder wenn es eine Funktion ist, sofort aufgerufen, auf dass diese Funktion sich weitere Argumente holt. Vielleicht ist es einfacher, weil gleichförmiger, wenn ich statt `name: wert` stattdessen ein `set 'name wert` fordere. Das `'` verhindert, dass das Wort ausgewertet wird. Alternativ könnte ich auch `"name"` erwarten, müsste dann aber meine strikte Regel, dass Wörter durch Weißraum getrennt sind, mit "außer sie stehen in Anfühungszeichen" aufweichen. Was ich nicht möchte, ist dass `set` speziell ist, was seine Argumente angeht. Andererseits, das `[` muss auch speziell sein, denn es liefert einen später ausführbaren Block von Wörtern bis zum passenden `]`. Somit kann ich wohl doch `set name wert` erlauben.
 
+### Ein Reader
+
 Beginne ich mit 
 
 ```zig
@@ -244,3 +246,50 @@ std.testing.expect(std.mem.eql(u8, word, "drucke"))
 
 Es gibt auch ein `expectEqualSlices`, das sieht einfacher aus. Kompiliert aber nicht, weil `word` optional ist. Grumpf. Ich ändere das jetzt in `""` steht für das Ende. Dann kann ich `expectEqualStrings` benutzen und der Test läuft.
 
+### Environment
+
+Als nächstes brauche ich eine _Hashmap_, in der ich zu jedem Wort die Funktion nachschauen kann. So etwas muss es doch in der Standardbibliothek geben.
+
+Angeblich funktioniert dies:
+
+
+```zig
+pub const Impl = fn (tsl: *Tsl) i64;
+
+var allocator = std.heap.page_allocator;
+var bindings = std.StringHashMap(Impl).init(allocator);
+```
+
+Wobei es aber recht umständlich ist, die `bindings` zu initialisieren, weil ich das wohl mit einer Reihe von `try bindings.put()` Befehlen machen muss. Zudem habe ich das Problem, dass `Impl` auf die Struktur `Tsl` verweist, diese aber besagte `bindings` hält und da der Zig-Compiler eine zyklische Abhänigkeit erkennt, die ich nicht so einfach auflösen kann.
+
+Auch Copilot hilft mir nicht und letztlich nach einigem _trial & error_ verzichte ich auf den Alias und nutze `*const fn (*Tsl) i64` an allen Stellen.
+
+Ich gestehe, ich habe nicht wirklich verstanden, wann ich Pointer und wann nicht benutzen soll oder muss und ich weiß auch noch nicht, wie ich in einer HashMap sowohl Zahlen als auch Funktionen speichere.
+
+Nach vielen Versuchen sieht meine Initialisierung nun so aus:
+
+```zig
+pub fn main() !void {
+    var allocator = std.heap.page_allocator;
+    var bindings = std.StringHashMap(*const fn (*Tsl) i64).init(allocator);
+    try bindings.put("drucke", doPrint);
+    try bindings.put("addiere", doAdd);
+    var words = [_][]const u8{
+        "drucke",
+        "addiere",
+        "3",
+        "addiere",
+        "4",
+        "5",
+    };
+    var tsl = Tsl{
+        .bindings = bindings,
+        .words = words[0..],
+    };
+    _ = tsl.eval();
+}
+```
+
+Ich habe es nicht hinbekommen, die Funktionen dort _inline_ zu definieren. Es scheint auch keinen Weg zu geben, den _slice_ der Wörter direkt zu übergeben. 
+
+Alles in allem wirkt das sehr umständlich.
