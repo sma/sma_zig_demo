@@ -343,3 +343,39 @@ pub fn main() !void {
     _ = tsl.run(try split("drucke addiere 3 4", allocator));
 }
 ```
+
+Als nächstes will ich nicht einfach -1 oder -2 in `eval` zurück geben, sondern "echte" Fehler werden. Dafür müssen die Signaturen von `i64` in `Error!i64` geändert werden und ich muss mir Fehler als `error` _enumeration_ definieren.
+
+```zig
+pub Tsl = struct {
+    ...
+
+    const Error = error{
+        EndOfInput,
+        UnknownWord,
+    };
+
+    pub fn eval(self: *Tsl) Error!i64 {
+        const word = self.next();
+        if (word.len == 0) return Error.EndOfInput;
+        if (self.bindings.get(word)) |impl| {
+            return try impl(self);
+        }
+        return std.fmt.parseInt(i64, word, 10) catch {
+            return Error.UnknownWord;
+        };
+    }
+
+    pub fn run(self: *Tsl, words: [][]const u8) Error!i64 {
+        self.words = words;
+        self.index = 0;
+        var result: i64 = 0;
+        while (self.index < self.words.len) {
+            result = try self.eval();
+        }
+        return result;
+    }
+}
+```
+
+Außerdem muss ich jetzt überall `try eval` statt nur `eval` schreiben.

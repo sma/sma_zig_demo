@@ -99,7 +99,13 @@ test "split" {
 }
 
 pub const Tsl = struct {
-    bindings: std.StringHashMap(*const fn (*Tsl) i64),
+    const Error = error{
+        UnbalancedBlock,
+        EndOfInput,
+        UnknownWord,
+    };
+
+    bindings: std.StringHashMap(*const fn (*Tsl) Error!i64),
     words: [][]const u8,
     index: usize = 0,
 
@@ -112,13 +118,13 @@ pub const Tsl = struct {
         return word;
     }
 
-    pub fn block(self: *Tsl) Tsl {
+    pub fn block(self: *Tsl) Error!Tsl {
         const start = self.index;
         var count = 1;
         while (count > 0) {
             const word = self.next();
             if (word.len == 0) {
-                std.debug.assert(false, "unbalanced block");
+                return Error.UnbalancedBlock;
             }
             if (word[0] == '[') {
                 count += 1;
@@ -132,37 +138,39 @@ pub const Tsl = struct {
         };
     }
 
-    pub fn eval(self: *Tsl) i64 {
+    pub fn eval(self: *Tsl) Error!i64 {
         const word = self.next();
-        if (word.len == 0) return -1;
+        if (word.len == 0) return Error.EndOfInput;
         if (self.bindings.get(word)) |impl| {
-            return impl(self);
+            return try impl(self);
         }
-        return std.fmt.parseInt(i64, word, 10) catch -2;
+        return std.fmt.parseInt(i64, word, 10) catch {
+            return Error.UnknownWord;
+        };
     }
 
-    pub fn run(self: *Tsl, words: [][]const u8) i64 {
+    pub fn run(self: *Tsl, words: [][]const u8) Error!i64 {
         self.words = words;
         self.index = 0;
         var result: i64 = 0;
         while (self.index < self.words.len) {
-            result = self.eval();
+            result = try self.eval();
         }
         return result;
     }
 };
 
 pub fn standard(allocator: std.mem.Allocator) !Tsl {
-    var bindings = std.StringHashMap(*const fn (*Tsl) i64).init(allocator);
+    var bindings = std.StringHashMap(*const fn (*Tsl) Tsl.Error!i64).init(allocator);
     try bindings.put("drucke", struct {
-        fn doPrint(t: *Tsl) i64 {
-            std.debug.print("{}\n", .{t.eval()});
+        fn doPrint(t: *Tsl) !i64 {
+            std.debug.print("{}\n", .{try t.eval()});
             return 0;
         }
     }.doPrint);
     try bindings.put("addiere", struct {
-        fn doAdd(t: *Tsl) i64 {
-            return t.eval() + t.eval();
+        fn doAdd(t: *Tsl) !i64 {
+            return try t.eval() + try t.eval();
         }
     }.doAdd);
     return Tsl{
@@ -174,5 +182,5 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
 pub fn main() !void {
     var allocator = std.heap.page_allocator;
     var tsl = try standard(allocator);
-    _ = tsl.run(try split("drucke addiere 3 4", allocator));
+    _ = try tsl.run(try split("drucke addiere 3 4", allocator));
 }
