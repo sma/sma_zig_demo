@@ -294,6 +294,8 @@ Ich habe es nicht hinbekommen, die Funktionen dort _inline_ zu definieren. Es sc
 
 Alles in allem wirkt das sehr umständlich.
 
+### Strings parsen
+
 Ich will nun meinen `Reader` mit dem Interpreter `Tsl` verbinden. Nach einigem Probieren kapsle ich das Aufsplitten des Strings in ein _slice_ in einer neuen Funktion `split`, die ebenfalls wieder Speicher reservieren muss und für die ich daher einen `Allocator` brauche:
 
 ```zig
@@ -344,6 +346,8 @@ pub fn main() !void {
 }
 ```
 
+### Echte Fehler
+
 Als nächstes will ich nicht einfach -1 oder -2 in `eval` zurück geben, sondern "echte" Fehler werden. Dafür müssen die Signaturen von `i64` in `Error!i64` geändert werden und ich muss mir Fehler als `error` _enumeration_ definieren.
 
 ```zig
@@ -379,3 +383,49 @@ pub Tsl = struct {
 ```
 
 Außerdem muss ich jetzt überall `try eval` statt nur `eval` schreiben.
+
+### Fakultät
+
+Es ist an der Zeit, das große Beispiel anzugehen. Implementierungen für  `multipliziere`, `subtrahiere`, `gleich?` und `wenn` sind einfach hinzuzufügen. Doch ein `funktion fakultät [n] [...]` (ich werde ein Wort definieren, dass eine neue benutzerdefinierte Funktion erzeugt, weil mein `eval` aktuell nur Zahlen unterstützt – daher musste ich schon _booleans_ mit 1 und 0 repräsentieren) stellt mich vor Probleme.
+
+Zig scheint keine _Closures_ zu kennen, die ich benutzen wollte:
+
+```zig
+pub fn standard(allocator: std.mem.Allocator) !Tsl {
+    ...
+    
+    try bindings.put("funktion", struct {
+        fn doFunc(t: *Tsl) !i64 {
+            var name = t.next(); // this should raise the error
+            if (name.len == 0) return Tsl.Error.EndOfInput;
+            var params = (try t.mustBeBlock()).words;
+            var body = (try t.mustBeBlock()).words;
+            try t.bindings.put(name, struct {
+                fn userFn(t1: *Tsl) !i64 {
+                    var tt = Tsl{
+                        .bindings = std.StringHashMap(*const fn (*Tsl) Tsl.Error!i64).init(allocator),
+                        .words = body,
+                    };
+                    var i: usize = 0;
+                    while (i < params.len) {
+                        const v = try t1.eval();
+                        try tt.bindings.put(params[i], struct {
+                            fn param(_: *Tsl) !i64 {
+                                return v;
+                            }
+                        }.param);
+                        i += 1;
+                    }
+                    return tt.evalAll();
+                }
+            }.userFn);
+            return 0;
+        }
+    }.doFunc);
+```
+
+Oder funktioniert das doch? Wenn ich an strategischen Stellen `const` statt `var` benutze, scheint die Variable _captured_ zu werden. Allerdings bekomme ich den `allocator` Paramter nicht übergeben. Ich hatte aber eh überlegt, ob ich ihn nicht in `Tsl` mir merken sollte. Allerdings hat zwar jetzt die IDE keine Probleme mehr, der Zig-Compiler mag aber trotzdem nicht auf `params` oder `body` aus der inneren Funktion zugreifen.
+
+Ich habe jetzt bestimmt eine Stunde herumprobiert und auch wenn Copilot auf die nun eingecheckte Lösung besteht … sie funktioniert nicht. Und ich habe inzwischen verstanden, das Zig keine _Closures_ kann, finde aber auch keinen Workaround, da es mir nicht gelingt, eine Funktion in irgendeinem Kontext zu definieren. 
+
+Ich gebe auf.

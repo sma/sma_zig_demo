@@ -1,4 +1,4 @@
-fakultät: funktion [n] [
+funktion fakultät [n] [
     wenn gleich? n 0 [1] [
         multipliziere n fakultät subtrahiere n 1
     ]
