@@ -293,3 +293,53 @@ pub fn main() !void {
 Ich habe es nicht hinbekommen, die Funktionen dort _inline_ zu definieren. Es scheint auch keinen Weg zu geben, den _slice_ der Wörter direkt zu übergeben. 
 
 Alles in allem wirkt das sehr umständlich.
+
+Ich will nun meinen `Reader` mit dem Interpreter `Tsl` verbinden. Nach einigem Probieren kapsle ich das Aufsplitten des Strings in ein _slice_ in einer neuen Funktion `split`, die ebenfalls wieder Speicher reservieren muss und für die ich daher einen `Allocator` brauche:
+
+```zig
+fn split(input: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
+    var words = std.ArrayList([]const u8).init(allocator);
+    defer words.deinit();
+
+    var reader = Reader{ .input = input };
+    while (true) {
+        const word = reader.nextWord();
+        if (word.len == 0) break;
+        try words.append(word);
+    }
+    return words.toOwnedSlice();
+}
+```
+
+Das Erzeugen eines Interpreters lagere ich in die Funktion `standard` aus (wo ich jetzt einen Weg gefunden habe, die Implementierungen _inline_ zu defineren):
+
+```zig
+pub fn standard(allocator: std.mem.Allocator) !Tsl {
+    var bindings = std.StringHashMap(*const fn (*Tsl) i64).init(allocator);
+    try bindings.put("drucke", struct {
+        fn doPrint(t: *Tsl) i64 {
+            std.debug.print("{}\n", .{t.eval()});
+            return 0;
+        }
+    }.doPrint);
+    try bindings.put("addiere", struct {
+        fn doAdd(t: *Tsl) i64 {
+            return t.eval() + t.eval();
+        }
+    }.doAdd);
+    return Tsl{
+        .bindings = bindings,
+        .words = &[_][]const u8{},
+    };
+}
+```
+
+Mein `main` ist jetzt erfreulich kurz (es _leaked_ jedoch den angeforderten Speicher, wahrscheinlich muss ich irgendwann noch eine `deinit`-Methode für `Tsl` schreiben, wofür ich mir wohl den `Allocator` merken müsste):
+
+```
+pub fn main() !void {
+    var allocator = std.heap.page_allocator;
+    var tsl = try standard(allocator);
+    _ = tsl.run(try split("drucke addiere 3 4", allocator));
+}
+```
