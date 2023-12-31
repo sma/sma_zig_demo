@@ -71,6 +71,9 @@ test "Reader" {
     try std.testing.expectEqualStrings(word, "");
 }
 
+/// Splits the `input` into words.
+///
+/// The caller must eventually free the returned slice.
 fn split(input: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
     var words = std.ArrayList([]const u8).init(allocator);
     defer words.deinit();
@@ -99,7 +102,7 @@ test "split" {
 pub const Tsl = struct {
     const Error = error{
         UnbalancedBlock,
-        BlockExpeced,
+        BlockExpected,
         EndOfInput,
         UnknownWord,
         OutOfMemory,
@@ -121,6 +124,20 @@ pub const Tsl = struct {
     words: [][]const u8,
     index: usize = 0,
 
+    pub fn init(parent: ?*Tsl, allocator: std.mem.Allocator) !Tsl {
+        return Tsl{
+            .allocator = allocator,
+            .bindings = std.StringHashMap(Value).init(allocator),
+            .parent = parent,
+            .words = &[_][]const u8{},
+        };
+    }
+
+    fn deinit(self: *Tsl) void {
+        self.bindings.deinit();
+    }
+
+    /// Returns the next word or `Error.EndOfInput`.
     pub fn next(self: *Tsl) ![]const u8 {
         if (self.index == self.words.len) {
             return Error.EndOfInput;
@@ -130,6 +147,9 @@ pub const Tsl = struct {
         return word;
     }
 
+    /// Returns the next block (after already reading the `[`)
+    /// as a new `Tsl` instance or `Error.UnbalancedBlock` if
+    /// a matching `]` is missing.
     pub fn block(self: *Tsl) Error!Tsl {
         const start = self.index;
         var count: usize = 1;
@@ -151,51 +171,47 @@ pub const Tsl = struct {
         };
     }
 
-    fn find(self: *Tsl, name: []const u8) ?Value {
-        if (self.bindings.get(name)) |impl| {
-            return impl;
-        }
-        if (self.parent) |parent| {
-            return parent.find(name);
-        }
-        return null;
+    /// Returns the value bound to `name` or `Error.UnknownWord`.
+    pub fn find(self: *Tsl, name: []const u8) Error!Value {
+        if (self.bindings.get(name)) |impl| return impl;
+        if (self.parent) |parent| return parent.find(name);
+        return Error.UnknownWord;
     }
 
+    /// Binds `name` to `value`.
+    pub fn set(self: *Tsl, name: []const u8, value: Value) Error!void {
+        try self.bindings.put(name, value);
+    }
+
+    /// Returns the result of the evaluation of the next word.
     pub fn eval(self: *Tsl) Error!i64 {
         const word = try self.next();
-        if (self.find(word)) |impl| {
-            switch (impl) {
-                Value.int => return impl.int,
-                Value.builtin => return try impl.builtin(self),
-                Value.function => {
-                    var t = impl.function.tsl;
-                    var tt = Tsl{
-                        .allocator = t.allocator,
-                        .bindings = std.StringHashMap(Value).init(t.allocator),
-                        .parent = t,
-                        .words = impl.function.body,
-                    };
-                    for (impl.function.params) |param| {
-                        var value = Value{ .int = try self.eval() };
-                        try tt.bindings.put(param, value);
-                    }
-                    return tt.evalAll();
-                },
-            }
-        }
-        return std.fmt.parseInt(i64, word, 10) catch {
-            std.debug.print("unknown word: {s}\n", .{word});
-            return Error.UnknownWord;
+        const impl = self.find(word) catch {
+            return std.fmt.parseInt(i64, word, 10) catch {
+                std.debug.print("unknown word: {s}\n", .{word});
+                return Error.UnknownWord;
+            };
         };
+        switch (impl) {
+            Value.int => return impl.int,
+            Value.builtin => return try impl.builtin(self),
+            Value.function => {
+                const t = impl.function.tsl;
+                var tt = try Tsl.init(t, t.allocator);
+                defer tt.deinit();
+                tt.words = impl.function.body;
+                for (impl.function.params) |param| {
+                    var value = Value{ .int = try self.eval() };
+                    try tt.bindings.put(param, value);
+                }
+                return tt.evalAll();
+            },
+        }
     }
 
-    pub fn run(self: *Tsl, words: [][]const u8) Error!i64 {
-        self.words = words;
-        self.index = 0;
-        return self.evalAll();
-    }
-
-    fn evalAll(self: *Tsl) Error!i64 {
+    /// Returns the result of the evaluation of all words until
+    /// the end of the input. Without any words, this returns 0.
+    pub fn evalAll(self: *Tsl) Error!i64 {
         var result: i64 = 0;
         while (self.index < self.words.len) {
             result = try self.eval();
@@ -203,47 +219,65 @@ pub const Tsl = struct {
         return result;
     }
 
+    /// Runs the given words like `evalAll`.
+    pub fn run(self: *Tsl, input: []const u8) Error!i64 {
+        self.words = try split(input, self.allocator);
+        defer self.allocator.free(self.words);
+        self.index = 0;
+        return self.evalAll();
+    }
+
+    /// Returns a block as `Tsl` instance or `Error.BlockExpected`
+    /// if the next word isn't a `[`. Actually, this shouldn't be
+    /// necessary, as I'd like to bind `[` to a builtin function
+    /// and allow blocks as well as integers as valid values.
     fn mustBeBlock(self: *Tsl) Error!Tsl {
-        var word = try self.next();
-        if (word[0] != '[') return Error.BlockExpeced;
+        var word = self.next() catch return Error.BlockExpected;
+        if (word[0] != '[') return Error.BlockExpected;
         return self.block();
     }
 };
 
+/// Returns a new `Tsl` instance with the standard bindings.
 pub fn standard(allocator: std.mem.Allocator) !Tsl {
-    var bindings = std.StringHashMap(Tsl.Value).init(allocator);
-    try bindings.put("drucke", Tsl.Value{ .builtin = struct {
+    var tsl = try Tsl.init(null, allocator);
+    try tsl.set("drucke", Tsl.Value{ .builtin = struct {
         fn doPrint(t: *Tsl) !i64 {
             std.debug.print("{}\n", .{try t.eval()});
             return 0;
         }
     }.doPrint });
-    try bindings.put("addiere", Tsl.Value{ .builtin = struct {
+    try tsl.set("addiere", Tsl.Value{ .builtin = struct {
         fn doAdd(t: *Tsl) !i64 {
             return try t.eval() + try t.eval();
         }
     }.doAdd });
-    try bindings.put("subtrahiere", Tsl.Value{ .builtin = struct {
+    try tsl.set("subtrahiere", Tsl.Value{ .builtin = struct {
         fn doSub(t: *Tsl) !i64 {
             return try t.eval() - try t.eval();
         }
     }.doSub });
-    try bindings.put("multipliziere", Tsl.Value{ .builtin = struct {
+    try tsl.set("multipliziere", Tsl.Value{ .builtin = struct {
         fn doMul(t: *Tsl) !i64 {
             return try t.eval() * try t.eval();
         }
     }.doMul });
-    try bindings.put("gleich?", Tsl.Value{ .builtin = struct {
+    try tsl.set("dividiere", Tsl.Value{ .builtin = struct {
+        fn doDiv(t: *Tsl) !i64 {
+            return @divExact(try t.eval(), try t.eval());
+        }
+    }.doDiv });
+    try tsl.set("gleich?", Tsl.Value{ .builtin = struct {
         fn doEq(t: *Tsl) !i64 {
             return if (try t.eval() == try t.eval()) 1 else 0;
         }
     }.doEq });
-    try bindings.put("kleiner?", Tsl.Value{ .builtin = struct {
+    try tsl.set("kleiner?", Tsl.Value{ .builtin = struct {
         fn doLt(t: *Tsl) !i64 {
             return if (try t.eval() < try t.eval()) 1 else 0;
         }
     }.doLt });
-    try bindings.put("wenn", Tsl.Value{ .builtin = struct {
+    try tsl.set("wenn", Tsl.Value{ .builtin = struct {
         fn doIf(t: *Tsl) !i64 {
             var cond = try t.eval();
             var thenBlock = try t.mustBeBlock();
@@ -251,7 +285,18 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
             return (if (cond != 0) thenBlock else elseBlock).evalAll();
         }
     }.doIf });
-    try bindings.put("funktion", Tsl.Value{
+    try tsl.set("solange", Tsl.Value{ .builtin = struct {
+        fn doWhile(t: *Tsl) !i64 {
+            var cond = try t.mustBeBlock();
+            var block = try t.mustBeBlock();
+            var result: i64 = 0;
+            while (try cond.evalAll() != 0) {
+                result = try block.evalAll();
+            }
+            return result;
+        }
+    }.doWhile });
+    try tsl.set("funktion", Tsl.Value{
         .builtin = struct {
             fn doFunc(t: *Tsl) !i64 {
                 const name = try t.next();
@@ -262,25 +307,26 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
                     .params = params,
                     .body = body,
                 } };
-                try t.bindings.put(name, value);
+                try t.set(name, value);
                 return 0;
             }
         }.doFunc,
     });
-    return Tsl{
-        .allocator = allocator,
-        .bindings = bindings,
-        .parent = null,
-        .words = &[_][]const u8{},
-    };
+    _ = try tsl.run("funktion minus [a] [subtrahiere 0 a]");
+    _ = try tsl.run("funktion nicht [a] [wenn a [0] [1]]");
+    _ = try tsl.run("funktion ungleich? [a b] [nicht [gleich? a b]]");
+    _ = try tsl.run("funktion groesser? [a b] [kleiner? b a]");
+    _ = try tsl.run("funktion kleinergleich? [a b] [nicht [größer? a b]]");
+    _ = try tsl.run("funktion größergleich? [a b] [nicht [kleiner? a b]]");
+
+    return tsl;
 }
 
-const example = @embedFile("fib.tsl");
+const example = @embedFile("fac.tsl");
 
 pub fn main() !void {
     var allocator = std.heap.page_allocator;
     var tsl = try standard(allocator);
-    _ = try tsl.run(try split(example, allocator));
-    allocator.free(tsl.words);
-    tsl.bindings.deinit();
+    defer tsl.deinit();
+    _ = try tsl.run(example);
 }
