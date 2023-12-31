@@ -187,10 +187,7 @@ pub const Tsl = struct {
     pub fn eval(self: *Tsl) Error!i64 {
         const word = try self.next();
         const impl = self.find(word) catch {
-            return std.fmt.parseInt(i64, word, 10) catch {
-                std.debug.print("unknown word: {s}\n", .{word});
-                return Error.UnknownWord;
-            };
+            return std.fmt.parseInt(i64, word, 10) catch Error.UnknownWord;
         };
         switch (impl) {
             Value.int => return impl.int,
@@ -237,6 +234,49 @@ pub const Tsl = struct {
         return self.block();
     }
 };
+
+test "tsl" {
+    var allocator = std.testing.allocator;
+    var tsl = try Tsl.init(null, allocator);
+    defer tsl.deinit();
+
+    // an integer literal
+    try std.testing.expectEqual(try tsl.run("42"), 42);
+    try std.testing.expectEqual(try tsl.run("-17"), -17);
+
+    // a known variable
+    try tsl.set("a", Tsl.Value{ .int = -21 });
+    try std.testing.expectEqual(try tsl.run("a"), -21);
+
+    // an unknown variable
+    try std.testing.expectError(Tsl.Error.UnknownWord, tsl.run("b"));
+
+    // a variable from the parent context
+    var innerTsl = try Tsl.init(&tsl, allocator);
+    defer innerTsl.deinit();
+    try std.testing.expectEqual(innerTsl.run("a"), -21);
+
+    // a builtin function call
+    try tsl.set("add", Tsl.Value{ .builtin = struct {
+        fn builtin(t: *Tsl) !i64 {
+            return try t.eval() + try t.eval();
+        }
+    }.builtin });
+    try std.testing.expectEqual(try tsl.run("add a 42"), 21);
+    try std.testing.expectEqual(try tsl.run("add 1 add 2 add 3 4"), 10);
+
+    // a user function call
+    var params = [_][]const u8{"a"};
+    var body = [_][]const u8{ "add", "a", "1" };
+    try tsl.set("inc", Tsl.Value{
+        .function = .{
+            .tsl = &tsl,
+            .params = &params,
+            .body = &body,
+        },
+    });
+    try std.testing.expectEqual(try tsl.run("inc 3"), 4);
+}
 
 /// Returns a new `Tsl` instance with the standard bindings.
 pub fn standard(allocator: std.mem.Allocator) !Tsl {
@@ -320,6 +360,15 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
     _ = try tsl.run("funktion größergleich? [a b] [nicht [kleiner? a b]]");
 
     return tsl;
+}
+
+test "standard" {
+    var allocator = std.testing.allocator;
+    var tsl = try standard(allocator);
+    defer tsl.deinit();
+    try tsl.set("a", Tsl.Value{ .int = 3 });
+    var result = try tsl.run("addiere a multipliziere 4 5");
+    try std.testing.expectEqual(result, 23);
 }
 
 const example = @embedFile("fac.tsl");
