@@ -121,9 +121,9 @@ pub const Tsl = struct {
     words: [][]const u8,
     index: usize = 0,
 
-    pub fn next(self: *Tsl) []const u8 {
+    pub fn next(self: *Tsl) ![]const u8 {
         if (self.index == self.words.len) {
-            return "";
+            return Error.EndOfInput;
         }
         const word = self.words[self.index];
         self.index += 1;
@@ -134,10 +134,9 @@ pub const Tsl = struct {
         const start = self.index;
         var count: usize = 1;
         while (count > 0) {
-            const word = self.next();
-            if (word.len == 0) {
+            const word = self.next() catch {
                 return Error.UnbalancedBlock;
-            }
+            };
             if (word[0] == '[') {
                 count += 1;
             } else if (word[0] == ']') {
@@ -163,8 +162,7 @@ pub const Tsl = struct {
     }
 
     pub fn eval(self: *Tsl) Error!i64 {
-        const word = self.next();
-        if (word.len == 0) return Error.EndOfInput;
+        const word = try self.next();
         if (self.find(word)) |impl| {
             switch (impl) {
                 Value.int => return impl.int,
@@ -206,8 +204,7 @@ pub const Tsl = struct {
     }
 
     fn mustBeBlock(self: *Tsl) Error!Tsl {
-        var word = self.next();
-        if (word.len == 0) return Error.EndOfInput;
+        var word = try self.next();
         if (word[0] != '[') return Error.BlockExpeced;
         return self.block();
     }
@@ -257,8 +254,7 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
     try bindings.put("funktion", Tsl.Value{
         .builtin = struct {
             fn doFunc(t: *Tsl) !i64 {
-                const name = t.next(); // this should raise the error
-                if (name.len == 0) return Tsl.Error.EndOfInput;
+                const name = try t.next();
                 const params = (try t.mustBeBlock()).words;
                 const body = (try t.mustBeBlock()).words;
                 var value = Tsl.Value{ .function = .{
