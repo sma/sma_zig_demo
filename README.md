@@ -506,3 +506,39 @@ Mit einem `switch` unterscheide ich die verschiedenen Fälle: Zahlen gebe ich ei
 
 Merkwürdigerweise funktioniert das und ich erhalte nach einem `zig build run` die Ausgabe `6227020800`, was passen könnte, wie Copilot meint.
 
+### Fibonacci deckt es auf.
+
+Wenn ich nun dies ausführen will
+
+    funktion fibonacci [n] [
+        wenn kleiner? n 3 [1] [
+            addiere fibonacci subtrahiere n 1 fibonacci subtrahiere n 2
+        ]
+    ]
+    drucke fibonacci 5
+
+erkenne ich, dass ich meine Variable `n` überschreibe, weil ich immer die selben `bindings` benutze. Und wenn ich korrekt neue `bindings` erzeuge (wie ich eigentlich auch wollte – das war ein Copilot-Fehler) finde ich die eingebauten Implementierungen nicht mehr, weil ich keine Vererbung zwischen den Kontexten habe.
+
+Ich füge daher ein dies hinzu:
+
+```zig
+pub const Tsl = struct {
+    ...
+
+    parent: *Tsl,
+
+    ...
+
+    fn find(self: *Tsl, name: []const u8) ?Value {
+        if (self.bindings.get(name)) |impl| {
+            return impl;
+        }
+        if (self.parent) |parent| {
+            return parent.find(name);
+        }
+        return null;
+    }
+}
+```
+
+Danach ändere ich `self.bindings.get` in `self.find`, fixe die restlichen Fehler, wo ich `Tsl` jetzt mit `parent` initialisieren muss und, voila, ich kann die Fibonacci-Zahl von 20 als `6765` korrekt bestimmen… Größere Zahlen gehen nicht, da das Unmengen an Speicher verbraucht, die `102334155` von `fib(40)` ja auch angibt, wie viele rekursive Aufrufe ich brauche. Und mein Interpreter gibt niemals Speicher frei und ich weiß nicht, ob ich nicht aus versehen, meine Wörter immer kopiere. Bei 80 GB RAM ist da irgendwann Schluss. Das kann nicht richtig sein!

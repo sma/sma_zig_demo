@@ -117,6 +117,7 @@ pub const Tsl = struct {
 
     allocator: std.mem.Allocator,
     bindings: std.StringHashMap(Value),
+    parent: ?*Tsl,
     words: [][]const u8,
     index: usize = 0,
 
@@ -146,14 +147,25 @@ pub const Tsl = struct {
         return Tsl{
             .allocator = self.allocator,
             .bindings = self.bindings,
+            .parent = self.parent,
             .words = self.words[start .. self.index - 1],
         };
+    }
+
+    fn find(self: *Tsl, name: []const u8) ?Value {
+        if (self.bindings.get(name)) |impl| {
+            return impl;
+        }
+        if (self.parent) |parent| {
+            return parent.find(name);
+        }
+        return null;
     }
 
     pub fn eval(self: *Tsl) Error!i64 {
         const word = self.next();
         if (word.len == 0) return Error.EndOfInput;
-        if (self.bindings.get(word)) |impl| {
+        if (self.find(word)) |impl| {
             switch (impl) {
                 Value.int => return impl.int,
                 Value.builtin => return try impl.builtin(self),
@@ -161,7 +173,8 @@ pub const Tsl = struct {
                     var t = impl.function.tsl;
                     var tt = Tsl{
                         .allocator = t.allocator,
-                        .bindings = t.bindings,
+                        .bindings = std.StringHashMap(Value).init(t.allocator),
+                        .parent = t,
                         .words = impl.function.body,
                     };
                     for (impl.function.params) |param| {
@@ -173,6 +186,7 @@ pub const Tsl = struct {
             }
         }
         return std.fmt.parseInt(i64, word, 10) catch {
+            std.debug.print("unknown word: {s}\n", .{word});
             return Error.UnknownWord;
         };
     }
@@ -227,6 +241,11 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
             return if (try t.eval() == try t.eval()) 1 else 0;
         }
     }.doEq });
+    try bindings.put("kleiner?", Tsl.Value{ .builtin = struct {
+        fn doLt(t: *Tsl) !i64 {
+            return if (try t.eval() < try t.eval()) 1 else 0;
+        }
+    }.doLt });
     try bindings.put("wenn", Tsl.Value{ .builtin = struct {
         fn doIf(t: *Tsl) !i64 {
             var cond = try t.eval();
@@ -255,11 +274,12 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
     return Tsl{
         .allocator = allocator,
         .bindings = bindings,
+        .parent = null,
         .words = &[_][]const u8{},
     };
 }
 
-const example = @embedFile("fac.tsl");
+const example = @embedFile("fib.tsl");
 
 pub fn main() !void {
     var allocator = std.heap.page_allocator;

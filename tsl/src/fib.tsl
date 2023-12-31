@@ -1,0 +1,6 @@
+funktion fibonacci [n] [
+    wenn kleiner? n 3 [1] [
+        addiere fibonacci subtrahiere n 1 fibonacci subtrahiere n 2
+    ]
+]
+drucke fibonacci 20
