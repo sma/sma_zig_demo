@@ -102,10 +102,21 @@ pub const Tsl = struct {
         BlockExpeced,
         EndOfInput,
         UnknownWord,
+        OutOfMemory,
+    };
+
+    const Value = union(enum) {
+        int: i64,
+        builtin: *const fn (*Tsl) Tsl.Error!i64,
+        function: struct {
+            tsl: *Tsl,
+            params: [][]const u8,
+            body: [][]const u8,
+        },
     };
 
     allocator: std.mem.Allocator,
-    bindings: std.StringHashMap(*const fn (*Tsl) Error!i64),
+    bindings: std.StringHashMap(Value),
     words: [][]const u8,
     index: usize = 0,
 
@@ -143,7 +154,23 @@ pub const Tsl = struct {
         const word = self.next();
         if (word.len == 0) return Error.EndOfInput;
         if (self.bindings.get(word)) |impl| {
-            return try impl(self);
+            switch (impl) {
+                Value.int => return impl.int,
+                Value.builtin => return try impl.builtin(self),
+                Value.function => {
+                    var t = impl.function.tsl;
+                    var tt = Tsl{
+                        .allocator = t.allocator,
+                        .bindings = t.bindings,
+                        .words = impl.function.body,
+                    };
+                    for (impl.function.params) |param| {
+                        var value = Value{ .int = try self.eval() };
+                        try tt.bindings.put(param, value);
+                    }
+                    return tt.evalAll();
+                },
+            }
         }
         return std.fmt.parseInt(i64, word, 10) catch {
             return Error.UnknownWord;
@@ -170,87 +197,61 @@ pub const Tsl = struct {
         if (word[0] != '[') return Error.BlockExpeced;
         return self.block();
     }
-
-    fn userFn(self: *Tsl, params: [][]const u8, body: [][]const u8) *const fn (*Tsl) Error!i64 {
-        const U = struct {
-            t: *Tsl,
-            params: [][]const u8,
-            body: [][]const u8,
-            fn call(u: *const @This()) Error!i64 {
-                var tt = Tsl{
-                    .allocator = u.t.allocator,
-                    .bindings = u.t.bindings,
-                    .words = u.body,
-                };
-                var i: usize = 0;
-                while (i < u.params.len) {
-                    try tt.bindings.put(u.params[i], struct {
-                        fn param(t: *Tsl) !i64 {
-                            return try t.eval();
-                        }
-                    }.param);
-                    i += 1;
-                }
-                return tt.evalAll();
-            }
-        };
-        var u = U{
-            .t = self,
-            .params = params,
-            .body = body,
-        };
-        return u.call;
-    }
 };
 
 pub fn standard(allocator: std.mem.Allocator) !Tsl {
-    var bindings = std.StringHashMap(*const fn (*Tsl) Tsl.Error!i64).init(allocator);
-    try bindings.put("drucke", struct {
+    var bindings = std.StringHashMap(Tsl.Value).init(allocator);
+    try bindings.put("drucke", Tsl.Value{ .builtin = struct {
         fn doPrint(t: *Tsl) !i64 {
             std.debug.print("{}\n", .{try t.eval()});
             return 0;
         }
-    }.doPrint);
-    try bindings.put("addiere", struct {
+    }.doPrint });
+    try bindings.put("addiere", Tsl.Value{ .builtin = struct {
         fn doAdd(t: *Tsl) !i64 {
             return try t.eval() + try t.eval();
         }
-    }.doAdd);
-    try bindings.put("subtrahiere", struct {
+    }.doAdd });
+    try bindings.put("subtrahiere", Tsl.Value{ .builtin = struct {
         fn doSub(t: *Tsl) !i64 {
             return try t.eval() - try t.eval();
         }
-    }.doSub);
-    try bindings.put("multipliziere", struct {
+    }.doSub });
+    try bindings.put("multipliziere", Tsl.Value{ .builtin = struct {
         fn doMul(t: *Tsl) !i64 {
             return try t.eval() * try t.eval();
         }
-    }.doMul);
-    try bindings.put("gleich?", struct {
+    }.doMul });
+    try bindings.put("gleich?", Tsl.Value{ .builtin = struct {
         fn doEq(t: *Tsl) !i64 {
             return if (try t.eval() == try t.eval()) 1 else 0;
         }
-    }.doEq);
-    try bindings.put("wenn", struct {
+    }.doEq });
+    try bindings.put("wenn", Tsl.Value{ .builtin = struct {
         fn doIf(t: *Tsl) !i64 {
             var cond = try t.eval();
             var thenBlock = try t.mustBeBlock();
             var elseBlock = try t.mustBeBlock();
             return (if (cond != 0) thenBlock else elseBlock).evalAll();
         }
-    }.doIf);
-    try bindings.put("funktion", struct {
-        fn doFunc(t: *Tsl) !i64 {
-            var name = t.next(); // this should raise the error
-            if (name.len == 0) return Tsl.Error.EndOfInput;
-            const params = (try t.mustBeBlock()).words;
-            const body = (try t.mustBeBlock()).words;
-            const func = t.userFn(params, body);
-            _ = func;
-            // try t.bindings.put(name, func);
-            return 0;
-        }
-    }.doFunc);
+    }.doIf });
+    try bindings.put("funktion", Tsl.Value{
+        .builtin = struct {
+            fn doFunc(t: *Tsl) !i64 {
+                const name = t.next(); // this should raise the error
+                if (name.len == 0) return Tsl.Error.EndOfInput;
+                const params = (try t.mustBeBlock()).words;
+                const body = (try t.mustBeBlock()).words;
+                var value = Tsl.Value{ .function = .{
+                    .tsl = t,
+                    .params = params,
+                    .body = body,
+                } };
+                try t.bindings.put(name, value);
+                return 0;
+            }
+        }.doFunc,
+    });
     return Tsl{
         .allocator = allocator,
         .bindings = bindings,

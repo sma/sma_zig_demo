@@ -429,3 +429,80 @@ Oder funktioniert das doch? Wenn ich an strategischen Stellen `const` statt `var
 Ich habe jetzt bestimmt eine Stunde herumprobiert und auch wenn Copilot auf die nun eingecheckte Lösung besteht … sie funktioniert nicht. Und ich habe inzwischen verstanden, das Zig keine _Closures_ kann, finde aber auch keinen Workaround, da es mir nicht gelingt, eine Funktion in irgendeinem Kontext zu definieren. 
 
 Ich gebe auf.
+
+### Unions für Werte
+
+Neuer Tag. Ich muss als Werte in den `bindings` mehr als nur `i64` speichern können. Eine _tagged union_ scheint mir der richtige Weg zu sein und diese kann ich dann auch nutzen, um neben Zig-Funktionen für Implementierungen auch benutzerdefinierte Funktionen, die `params` und `body` brauchen (und eigentlich auch noch den definierenden Kontext), zu repräsentieren:
+
+```zig
+pub const Tsl = struct {
+    ...
+
+    const Value = union(enum) {
+        int: i64,
+        builtin: *const fn (*Tsl) Tsl.Error!i64,
+        function: struct {
+            params: [][]const u8,
+            body: [][]const u8,
+        },
+    };
+
+    ...
+}
+```
+
+Ich müsste eigentlich das `i64` überall durch `Value` ersetzen, aber das lasse ich erst noch mal weg und konzentriere mich auf die `bindings`, wo die alles entscheidende Funktion jetzt so ausieht:
+
+```zig
+    try bindings.put("funktion", Tsl.Value{
+        .builtin = struct {
+            fn doFunc(t: *Tsl) !i64 {
+                var name = t.next(); // this should raise the error
+                if (name.len == 0) return Tsl.Error.EndOfInput;
+                const params = (try t.mustBeBlock()).words;
+                const body = (try t.mustBeBlock()).words;
+                var value = Tsl.Value{ .function = .{
+                    .params = params,
+                    .body = body,
+                } };
+                try t.bindings.put(name, value);
+                return 0;
+            }
+        }.doFunc,
+    });
+```
+
+Die neue `eval`-Methode sieht jetzt so aus:
+
+```zig
+    pub fn eval(self: *Tsl) Error!i64 {
+        const word = self.next();
+        if (word.len == 0) return Error.EndOfInput;
+        if (self.bindings.get(word)) |impl| {
+            switch (impl) {
+                Value.int => return impl.int,
+                Value.builtin => return try impl.builtin(self),
+                Value.function => {
+                    var tt = Tsl{
+                        .allocator = self.allocator,
+                        .bindings = std.StringHashMap(Value).init(self.allocator),
+                        .words = impl.function.body,
+                    };
+                    for (impl.function.params) |param| {
+                        var value = Value{ .int = try self.eval() };
+                        try tt.bindings.put(param, value);
+                    }
+                    return tt.evalAll();
+                },
+            }
+        }
+        return std.fmt.parseInt(i64, word, 10) catch {
+            return Error.UnknownWord;
+        };
+    }
+```
+
+Mit einem `switch` unterscheide ich die verschiedenen Fälle: Zahlen gebe ich einfach zurück, Zig-Funktionen rufe ich wie bisher auf und meine benutzerdefinierten Funktionen implementiere ich jetzt direkt hier: Ich brauche eine neue Ausführungsumgebung `tt`, in der ich dann alle Parameter setze und schließlich den Rumpf der Funktion ausführe.
+
+Merkwürdigerweise funktioniert das und ich erhalte nach einem `zig build run` die Ausgabe `6227020800`, was passen könnte, wie Copilot meint.
+
