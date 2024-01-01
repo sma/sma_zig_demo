@@ -542,3 +542,21 @@ pub const Tsl = struct {
 ```
 
 Danach ändere ich `self.bindings.get` in `self.find`, fixe die restlichen Fehler, wo ich `Tsl` jetzt mit `parent` initialisieren muss und, voila, ich kann die Fibonacci-Zahl von 20 als `6765` korrekt bestimmen… Größere Zahlen gehen nicht, da das Unmengen an Speicher verbraucht, die `102334155` von `fib(40)` ja auch angibt, wie viele rekursive Aufrufe ich brauche. Und mein Interpreter gibt niemals Speicher frei und ich weiß nicht, ob ich nicht aus versehen, meine Wörter immer kopiere. Bei 80 GB RAM ist da irgendwann Schluss. Das kann nicht richtig sein!
+
+### Fazit
+
+Ich vermisse _Closures_. Ich verstehe, warum Zig sie nicht hat. Ohne automatische Speicherveraltung kann man den äußeren Kontext kaum verwalten. Ich verstehe auch, warum sie die manuelle Speicherverwaltung so explizit machen, aber es wirkt dadurch ziemlich mühsam. Ich müsste für meine Scriptsprache eine eigene automatische Speicherverwaltung implementieren. Das ist aufwendiger als alles, woraus die Sprache bislang besteht. Es hat mich außerdem mehr als 4h gekostet, einzusehen, dass Zig wirklich nicht kann, was ich will und ich einen anderen Ansatz (die _tagged union_) brauche.
+
+Die explizite Fehlerbehandlung mittels _error union_ ist okay und das `try`, das im Prinzip einem "wenn Fehler, dann jetzt return mit dem Fehler" entspricht, ist erstaunlich okay. Auch das `catch` ist bequem zu benutzen. Das ist besser als bei Go.
+
+Bis ich die Unittests schrieb, für die ich ein `deinit` bzw. `free` hinzufügen müsste, weil der `std.testing.Allocator` sonst _leaks_ gemeldet hat, hatte `fibonacci 40` gigabyte-weise RAM verbraucht. Nun läuft das (wenn auch wie erwartet langsam) in unter 1 MB ab.
+
+Die integrierbaren _unit tests_ sind nett, aber ich könnte auch ohne Leben und tatsächlich eher eigene Dateien vorziehen, auch wenn man dann natürlich nur das öffentliche API und nicht die privaten Funktionen testen kann.
+
+Copilot hat geholfen, mir Code vorzuschlagen, meist hat er in Details aber nicht gestimmt und ich brauchte immer _trail and error_ um die Typen kompatibel zueinander zu machen. Ungewohnt primitiv ist, dass die IDE kaum Fehler meldet und man erst `zig build` aufrufen muss, was wiederum den Fehler in ziemlich Müllausgaben verbirgt. Das nervt.
+
+### CG-Überlegungen
+
+Eine TSL-Funktion muss ihren definierenden Kontext kennen und dieser kennt seinen übergeordneten Kontext und auch _bindings_, in denen weitere TSL-Funktionen enthalten sein können, die weitere Kontexte kennen. Ich kann einen Kontext damit erst dann frei geben, wenn er nirgends reserviert wird.
+
+Aktuell ist er ein _record_ bestehend aus der Referenz auf den übergeordneten Kontext, der Referenz auf die manuell angelegten _bindings_, der Referenz auf die Wörter sowie einem Index in diese. Freigeben muss ich die _bindings_. Wie Python könnte ich zwei _bindings_ verwalten, lokale und globale und damit annehmen, dass die lokalen eher klein sind und das alles in den globalen Bindings niemals verschwindet.
