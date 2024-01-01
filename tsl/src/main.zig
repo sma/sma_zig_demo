@@ -1,6 +1,7 @@
 const std = @import("std");
 
-pub const Reader = struct {
+/// An iterator to read words from an input string.
+const Reader = struct {
     input: []const u8,
     index: usize = 0,
 
@@ -14,40 +15,41 @@ pub const Reader = struct {
         return isOneOf(c, " \n\r\t");
     }
 
-    fn isParentheses(c: u8) bool {
+    fn isSyntax(c: u8) bool {
         return isOneOf(c, "[]{}();");
     }
 
     fn isWord(c: u8) bool {
-        return !isWhitespace(c) and !isParentheses(c);
+        return !isWhitespace(c) and !isSyntax(c);
     }
 
     pub fn nextWord(self: *Reader) []const u8 {
-        while (self.index < self.input.len and isWhitespace(self.input[self.index])) {
+        const len = self.input.len;
+        while (self.index < len and isWhitespace(self.input[self.index])) {
             self.index += 1;
         }
-        if (self.index == self.input.len)
-            return self.input[self.index..self.index];
         const start = self.index;
+        if (self.index == len)
+            return self.input[start..start];
         if (self.input[self.index] == ';') {
             self.index += 1;
-            while (self.index < self.input.len and self.input[self.index] != '\n') {
+            while (self.index < len and self.input[self.index] != '\n') {
                 self.index += 1;
             }
         } else if (self.input[self.index] == '"') {
             self.index += 1;
-            while (self.index < self.input.len and self.input[self.index] != '"') {
+            while (self.index < len and self.input[self.index] != '"') {
                 self.index += 1;
             }
-            if (self.index < self.input.len) {
+            if (self.index < len) {
                 self.index += 1;
             }
-        } else if (isParentheses(self.input[self.index])) {
+        } else if (isSyntax(self.input[self.index])) {
             self.index += 1;
             return self.input[start..self.index];
         } else {
             self.index += 1;
-            while (self.index < self.input.len and isWord(self.input[self.index])) {
+            while (self.index < len and isWord(self.input[self.index])) {
                 self.index += 1;
             }
         }
@@ -56,13 +58,15 @@ pub const Reader = struct {
 };
 
 test "Reader" {
-    var r = Reader{ .input = "[3 \"[]\" drucke]" };
+    var r = Reader{ .input = "[3 \"[]\" ; Kommentar\ndrucke]" };
     var word = r.nextWord();
     try std.testing.expectEqualStrings(word, "[");
     word = r.nextWord();
     try std.testing.expectEqualStrings(word, "3");
     word = r.nextWord();
     try std.testing.expectEqualStrings(word, "\"[]\"");
+    word = r.nextWord();
+    try std.testing.expectEqualStrings(word, "; Kommentar");
     word = r.nextWord();
     try std.testing.expectEqualStrings(word, "drucke");
     word = r.nextWord();
@@ -71,7 +75,7 @@ test "Reader" {
     try std.testing.expectEqualStrings(word, "");
 }
 
-/// Splits the `input` into words.
+/// Splits `input` into words.
 ///
 /// The caller must eventually free the returned slice.
 fn split(input: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
@@ -81,10 +85,9 @@ fn split(input: []const u8, allocator: std.mem.Allocator) ![][]const u8 {
     var reader = Reader{ .input = input };
     while (true) {
         const word = reader.nextWord();
-        if (word.len == 0) break;
+        if (word.len == 0) return words.toOwnedSlice();
         try words.append(word);
     }
-    return words.toOwnedSlice();
 }
 
 test "split" {
@@ -99,6 +102,9 @@ test "split" {
     allocator.free(words);
 }
 
+/// A TSL interpreter.
+///
+/// It only supports integer and block values.
 pub const Tsl = struct {
     const Error = error{
         UnbalancedBlock,
@@ -110,6 +116,7 @@ pub const Tsl = struct {
 
     const Value = union(enum) {
         int: i64,
+        block: [][]const u8,
         builtin: *const fn (*Tsl) Tsl.Error!i64,
         function: struct {
             tsl: *Tsl,
@@ -142,15 +149,13 @@ pub const Tsl = struct {
         if (self.index == self.words.len) {
             return Error.EndOfInput;
         }
-        const word = self.words[self.index];
-        self.index += 1;
-        return word;
+        defer self.index += 1;
+        return self.words[self.index];
     }
 
     /// Returns the next block (after already reading the `[`)
-    /// as a new `Tsl` instance or `Error.UnbalancedBlock` if
-    /// a matching `]` is missing.
-    pub fn block(self: *Tsl) Error!Tsl {
+    /// or `Error.UnbalancedBlock` if a matching `]` is missing.
+    pub fn block(self: *Tsl) Error![][]const u8 {
         const start = self.index;
         var count: usize = 1;
         while (count > 0) {
@@ -163,18 +168,13 @@ pub const Tsl = struct {
                 count -= 1;
             }
         }
-        return Tsl{
-            .allocator = self.allocator,
-            .bindings = self.bindings,
-            .parent = self.parent,
-            .words = self.words[start .. self.index - 1],
-        };
+        return self.words[start .. self.index - 1];
     }
 
     /// Returns the value bound to `name` or `Error.UnknownWord`.
-    pub fn find(self: *Tsl, name: []const u8) Error!Value {
+    pub fn get(self: *Tsl, name: []const u8) Error!Value {
         if (self.bindings.get(name)) |impl| return impl;
-        if (self.parent) |parent| return parent.find(name);
+        if (self.parent) |parent| return parent.get(name);
         return Error.UnknownWord;
     }
 
@@ -186,11 +186,17 @@ pub const Tsl = struct {
     /// Returns the result of the evaluation of the next word.
     pub fn eval(self: *Tsl) Error!i64 {
         const word = try self.next();
-        const impl = self.find(word) catch {
+        const impl = self.get(word) catch {
             return std.fmt.parseInt(i64, word, 10) catch Error.UnknownWord;
         };
         switch (impl) {
             Value.int => return impl.int,
+            Value.block => {
+                var tt = try Tsl.init(self, self.allocator);
+                defer tt.deinit();
+                tt.words = impl.block;
+                return tt.evalAll();
+            },
             Value.builtin => return try impl.builtin(self),
             Value.function => {
                 const t = impl.function.tsl;
@@ -210,6 +216,7 @@ pub const Tsl = struct {
     /// the end of the input. Without any words, this returns 0.
     pub fn evalAll(self: *Tsl) Error!i64 {
         var result: i64 = 0;
+        self.index = 0;
         while (self.index < self.words.len) {
             result = try self.eval();
         }
@@ -231,7 +238,13 @@ pub const Tsl = struct {
     fn mustBeBlock(self: *Tsl) Error!Tsl {
         var word = self.next() catch return Error.BlockExpected;
         if (word[0] != '[') return Error.BlockExpected;
-        return self.block();
+        return Tsl{
+            .allocator = self.allocator,
+            .bindings = self.bindings,
+            .parent = self,
+            .words = try self.block(),
+            .index = 0,
+        };
     }
 };
 
@@ -328,10 +341,10 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
     try tsl.set("solange", Tsl.Value{ .builtin = struct {
         fn doWhile(t: *Tsl) !i64 {
             var cond = try t.mustBeBlock();
-            var block = try t.mustBeBlock();
+            var body = try t.mustBeBlock();
             var result: i64 = 0;
             while (try cond.evalAll() != 0) {
-                result = try block.evalAll();
+                result = try body.evalAll();
             }
             return result;
         }
@@ -340,8 +353,8 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
         .builtin = struct {
             fn doFunc(t: *Tsl) !i64 {
                 const name = try t.next();
-                const params = (try t.mustBeBlock()).words;
-                const body = (try t.mustBeBlock()).words;
+                const params = (try t.mustBeBlock()).words; // leaks Tsl
+                const body = (try t.mustBeBlock()).words; // leaks Tsl
                 var value = Tsl.Value{ .function = .{
                     .tsl = t,
                     .params = params,
@@ -351,6 +364,16 @@ pub fn standard(allocator: std.mem.Allocator) !Tsl {
                 return 0;
             }
         }.doFunc,
+    });
+    try tsl.set("sei", Tsl.Value{
+        .builtin = struct {
+            fn doSet(t: *Tsl) !i64 {
+                const name = try t.next();
+                var value = try t.eval();
+                try t.set(name, Tsl.Value{ .int = value });
+                return value;
+            }
+        }.doSet,
     });
     _ = try tsl.run("funktion minus [a] [subtrahiere 0 a]");
     _ = try tsl.run("funktion nicht [a] [wenn a [0] [1]]");
@@ -369,9 +392,11 @@ test "standard" {
     try tsl.set("a", Tsl.Value{ .int = 3 });
     var result = try tsl.run("addiere a multipliziere 4 5");
     try std.testing.expectEqual(result, 23);
+    result = try tsl.run("solange [kleiner? a 10] [sei a addiere a 1] a");
+    try std.testing.expectEqual(result, 10);
 }
 
-const example = @embedFile("fac.tsl");
+const example = @embedFile("fib.tsl");
 
 pub fn main() !void {
     var allocator = std.heap.page_allocator;
