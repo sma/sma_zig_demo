@@ -1,34 +1,25 @@
 const std = @import("std");
 
 /// Represents a TSL value.
+///
+/// This is a 48-byte value type because of `closure` and we should probably
+/// use a pointer here. This however means we need to allocate and free memory
+/// when creating and destroying `State` instances.
+///
+/// The `free` variant is used to implement a linked list of free `Value` used
+/// by the memory manager. That memory manager also needs to "mark" values.
 pub const Value = union(enum) {
     nil,
     int: i64, // 8 bytes
     string: []const u8, // 16 bytes
     block: []const []const u8, // 16 bytes
     builtin: *const fn (*const State) Value, // 8 bytes
-    closure: *const Closure, // 8 bytes
-
-    const Closure = struct { // 40 bytes
+    closure: struct { // 40 bytes
         parent: *const State,
         params: []const []const u8,
         block: []const []const u8,
-    };
-
-    fn closure(
-        parent: *const State,
-        params: []const []const u8,
-        block: []const []const u8,
-        allocator: std.mem.Allocator,
-    ) !Value {
-        const c = (try allocator.alloc(Closure, 1));
-        c[0].parent = parent;
-        c[0].params = params;
-        c[0].block = block;
-        return Value{
-            .closure = &c[0],
-        };
-    }
+    },
+    free: *Value, // 8 bytes
 };
 
 /// Holds the state of the TSL interpreter.
@@ -76,7 +67,7 @@ const State = struct {
 
     /// Binds `value` to `name`. This overwrites any existing binding.
     /// If no binding exists, it is created in the local scope.
-    fn set(state: *State, name: []const u8, value: Value) !void {
+    fn put(state: *State, name: []const u8, value: Value) !void {
         var current: ?*State = state;
         while (current != null) : (current = current.parent) {
             if (current.locals.get(name)) {
