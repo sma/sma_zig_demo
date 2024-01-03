@@ -805,3 +805,250 @@ Erkenntnis ist aber, dass die Interaktion mit C dadurch, das _slices_ normalerwe
 ## SDL
 
 Ich habe auch noch versucht, die SDL-Bibliothek zu benutzen und da funktioniert das Beispiel auf anhieb. Das war nett. Hier könnte man jetzt auch wieder anfangen, ein Zig-kompatibles API über das C-API zu setzen, damit man das schöner benutzen kann und natürlich haben Leute das auch schon gemacht. Das kann man aber nicht so einfach finden und nutzen, da es noch keinen offiziellen Package-Manager inklusive zentralem Repository gibt.
+
+## Parser-Kombinator
+
+In der Theorie ist ein _Parser_ eine Funktion, die eine _Eingabe_ entweder (teilweise) _akzeptiert_ und ein _Ergebnis_ zusammen mit der restlichen Eingabe liefert oder mit einem _Fehler_ _zurückweist_. Es gibt dann primitive Parser, die z.B. ein bestimmtes einzelnes Element der Eingabe akzeptieren und komplexe Parser, die andere Parser _kombinieren_, etwa ein Parser, der entweder den einen oder den anderen Parser nimmt, beide nacheinander ausführt oder einen Parser solange nacheinander ausführt, wie er die Eingabe akzeptiert. Dies sind die selben Bausteine, aus denen kontextfreie Grammatiken aufgebaut sind.
+
+In Dart könnte ein Parser so definiert werden:
+
+```dart
+sealed class Result<T, I> {...}
+class Success<T, I> extends Result<T, I> { ... }
+class Failure<T, I> extends Result<T, I> { ... }
+
+typedef Parser<T, I> = Result<T, I> Function(I);
+
+Parser<String, String> char(String c) {
+  return (input) {
+    if (input.isNotEmpty && input[0] == c) {
+      return Success(c, input.substring(1));
+    }
+    return Failure("expected $c");
+  };
+}
+
+Parser<T, I> alt<T, I>(Parser<T, I> p1, Parser<T, I> p2) {
+  return (input) => switch (p1(input)) {
+        Success(:var value, :var input) => Success(value, input),
+        Failure(message: var message1) => switch (p2(input)) {
+            Success(:var value, :var input) => Success(value, input),
+            Failure(message: var message2) => Failure('$message1 or $message2'),
+          },
+      };
+}
+
+Parser<(T1, T2), I> seq<T1, T2, I>(Parser<T1, I> p1, Parser<T2, I> p2) {
+  return (input) => switch (p1(input)) {
+        Success(value: var value1, :var input) => switch (p2(input)) {
+            Success(value: var value2, :var input) => Success((value1, value2), input),
+            Failure(message: var message) => Failure(message),
+          },
+        Failure(message: var message) => Failure(message),
+      };
+}
+
+Parser<List<T>, I> rep<T, I>(Parser<T, I> p) {
+  return (input) {
+    final result = <T>[];
+    while (true) {
+      final r = p(input);
+      if (r is Success<T, I>) {
+        result.add(r.value);
+        input = r.input;
+      } else {
+        return Success(result, input);
+      }
+    }
+  };
+}
+```
+
+In Zig gibt es weniger generische Typen noch Klassen oder Vererbung, aber man kann zur Laufzeit neue Strukturen und damit auch neue Typen erzeugen.
+
+### Stack<T>
+
+Hier ist ein Beispiel für einen `Stack`:
+
+```zig
+pub fn Stack(comptime T: type, comptime n: comptime_int) type {
+    return struct {
+        elements: [n]T = undefined,
+        index: usize = 0,
+
+        const Self = @This();
+
+        pub fn push(self: *Self, value: T) void {
+            self.elements[self.index] = value;
+            self.index += 1;
+        }
+
+        pub fn pop(self: *Self) T {
+            self.index -= 1;
+            return self.elements[self.index];
+        }
+    };
+}
+```
+
+Die Funktion `Stack` erzeugt nun einen konkreten Typ, z.B. `Stack(u16, 128)` und den kann ich dann initialisieren und nutzen wie jeden anderen Typ auch:
+
+```zig
+var stack = Stack(u16, 128){};
+stack.push(3);
+stack.push(4);
+stack.pop(); // 4
+stack.pop(); // 3
+```
+
+### Result<T, I>
+
+Das gleiche Prinzip kann ich nun nutzen, um einen `Result`-Type basierend auf einer _tagged union_ zu erzeugen, bei dem ich `T` und `I` _generisch_ mache:
+
+```zig
+fn Result(comptime T: type, comptime I: type) type {
+    return union(enum) {
+        success: struct {
+            value: T,
+            rest: I,
+        },
+        failure: str,
+    };
+}
+```
+
+### Parser<T, I>
+
+Der Parser ist aber komplizierter, weil ich weder _Closures_ noch Vererbung habe. Ich muss die Funktion, die den Parser implementiert, daher als `struct` übergeben und ich habe `usingnamespace` gefunden, was eine Struktur in eine andere einbettet.
+
+```zig
+pub fn Parser(comptime P: type) type {
+    return struct {
+        const Self = @This();
+
+        pub usingnamespace P;
+    };
+}
+```
+
+Was man jetzt noch machen will: Zur Übersetzungszeit nachgucken, ob `P` wohl eine Struktur ist, die die eine `parse` Funktion hat, die ein `Result(T, I)` zurückliefert und selbst einen Parameter hat, der ein `I` ist. Mit `@field(P, "parse")` kommt man z.B. an die Funktion, mit `@typeInfo` kann man gucken, dass das wirklich eine Funktion ist und dann mit `return_type` und `param[0]` auf eben erwähnten Typen zugreifen und dann prüfen. Damit ich die beiden Typen von `Result` kenne, muss ich die so exportieren:
+
+```zig
+fn Result(comptime _T: type, comptime _I: type) type {
+    return union(enum) {
+        const T = _T;
+        const I = _I;
+        ...
+    }
+}
+```
+
+Und dann kann ich das hier machen:
+
+```zig
+pub fn Parser(comptime P: type) type {
+    switch (@typeInfo(@TypeOf(@field(P, "parse")))) {
+        .Fn => |f| {
+            if (f.params[0].type.? != f.return_type.?.I) {
+                @panic("parse function has wrong signature");
+            }
+        },
+        else => unreachable,
+    }
+    ...
+}
+```
+
+Als nächstes kann ich dann eine Funktion `Char` schreiben, mit der ich einen Parser erzeugen kann, der ein einzelnes Zeichen parsen kann:
+
+```zig
+fn Char(comptime c: u8) type {
+    return Parser(struct {
+        fn parse(input: str) Result(u8, str) {
+            if (input.len > 0 and input[0] == c) {
+                return Result(u8, str).success(input[0], input[1..]);
+            }
+            return Result(u8, str).failure("expected char");
+        }
+    });
+}
+```
+
+Für `alt`, `seq` und `rep` muss ich die Typen `T` und `I` kennen, was ich mir über das `Result` holen kann, was ich eben garede schon mühsam berechnet habe. Daher ergänze ich noch:
+
+```zig
+pub fn Parser(comptime P: type) type {
+    ...
+
+    return struct {
+        const Result = (switch (@typeInfo(@TypeOf(@field(P, "parse")))) {
+            .Fn => |f| f.return_type.?,
+            else => unreachable,
+        });
+
+        ...
+    }
+}
+```
+
+Jetzt kann ich mir dies hier zusammenstückeln, leider völlig ohne _code completion_, weil die IDE nicht wissen kann, was der Compiler da nachher ausrechnet, **bevor** er die Typprüfung macht. Das komplizierteste hier ist, dass ich zwei Strings kombinieren will, was ich nicht kann, ohne einen `Allocator`, den ich jetzt aber nicht einführen will, daher nutze ich einen statischen Buffer, der nicht lange genug lebt. Aber egal.
+
+```zig
+fn Alt(comptime p1: type, comptime p2: type) type {
+    const R = p1.Result;
+    if (p2.Result != R) {
+        @panic("both parsers need the same result type");
+    }
+
+    return Parser(struct {
+        var buf: [1024]u8 = undefined;
+
+        fn parse(input: R.I) R {
+            return switch (p1.Self.parse(input)) {
+                .success => |s1| R.success(s1.value, s1.rest),
+                .failure => |f1| switch (p2.Self.parse(input)) {
+                    .success => |s2| R.success(s2.value, s2.rest),
+                    .failure => |f2| R.failure(std.fmt.bufPrint(&buf, "{s} or {s}", .{ f1, f2 }) catch "?"),
+                },
+            };
+        }
+    });
+}
+```
+
+Das `Seq` und `Rep` könnt ihr jetzt ja selbst bauen. Na gut, hier noch das `Rep`, das wieder einen `Allocator` bräuchte, da ich die Ergebnisse akkumulieren will.
+
+```zig
+fn Rep(comptime p: type) type {
+    const R = Result([]p.Result.T, p.Result.I);
+    return Parser(struct {
+        var results: [1024]p.Result.T = undefined;
+
+        fn parse(input: R.I) R {
+            var i: usize = 0;
+            var rest = input;
+            while (true) {
+                switch (p.Self.parse(rest)) {
+                    .success => |s| {
+                        results[i] = s.value;
+                        rest = s.rest;
+                    },
+                    .failure => return R.success(results[0..i], rest),
+                }
+            }
+        }
+    });
+}
+```
+
+Jetzt kann ich mit einem `{a|b}`-Parser einen String teilweise einlesen:
+
+```zig
+pub fn main() void {
+    const Ca = Char('a');
+    const Cb = Char('b');
+    const P = Rep(Alt(Ca, Cb));
+    var r = P.Self.parse("abbc");
+    std.debug.print("{}\n", .{r});
+}
+```
